@@ -1,19 +1,15 @@
 use anyhow::{Context, Result};
-use clap::{AppSettings, Parser};
+use clap::Parser;
 use nix::mount::MsFlags;
 use nix::{mount, sched, sys, unistd, NixPath};
-use std::os::raw::c_int;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use tracing::{debug, error, event, info, instrument, trace, Level};
 
-const STAK_SIZE: usize = 4096 * 1024;
-const SIGCHLD: c_int = 17;
-
 #[derive(Parser, Debug)]
 pub struct RunOpts {
     /// Specify the root directory path
-    #[clap(long, short, default_value = ".")]
+    #[clap(long, short)]
     fsroot: String,
     /// Specify the path to the application to run
     app: String,
@@ -21,61 +17,81 @@ pub struct RunOpts {
     arguments: Vec<String>,
 }
 
+#[instrument]
 pub fn run(opts: RunOpts) -> Result<()> {
-    unistd::chroot(&opts.fsroot[..])?;
-
-    let child_pid = sched::clone(
-        Box::new(|| contained_main(&opts.app[..], &opts.arguments[..]) as isize),
-        Box::new([0u8; STAK_SIZE]).as_mut(),
-        sched::CloneFlags::CLONE_NEWPID
-            | sched::CloneFlags::CLONE_NEWNS
-            | sched::CloneFlags::CLONE_NEWUTS,
-        Some(SIGCHLD),
-    )
-    .context("error cloning new process")?;
-    debug!("clone() = {}", child_pid);
-
-    let status = sys::wait::wait().context("error waiting child process")?;
-    debug!("waitpid() = {:?}", status);
-
     debug!("host nodename = {:?}", sys::utsname::uname().nodename());
+
+    sched::unshare(sched::CloneFlags::CLONE_NEWNS)?;
+
+    sched::unshare(sched::CloneFlags::CLONE_NEWPID)?;
+
+    sched::unshare(sched::CloneFlags::CLONE_NEWUTS)?; // for hostname
+    unistd::sethostname("container")?;
+    debug!(
+        "container nodename = {:?}",
+        sys::utsname::uname().nodename()
+    );
+
+    let mut command = Command::new("/proc/self/exe");
+    command.arg0("init").arg("start");
+    command.args(["--fsroot", &opts.fsroot]);
+    command.arg(&opts.app).args(opts.arguments);
+    command.env("PATH", "/bin");
+
+    let status = command.spawn()?.wait()?;
+    debug!("container exited with status {:?}", status);
 
     Ok(())
 }
 
 #[instrument]
-fn contained_main(app: &str, arguments: &[String]) -> i32 {
-    debug!(
-        "this() = {}, parent() = {}",
-        unistd::Pid::this(),
-        unistd::Pid::parent()
-    );
+pub fn start(opts: RunOpts) -> Result<()> {
+    unistd::chroot(&opts.fsroot[..])?;
+    unistd::chdir("/")?;
 
-    let mut command = Command::new(app);
-    command.env("PATH", "/bin").args(arguments);
-    unsafe {
-        command.pre_exec(|| {
-            unistd::chdir("/")?;
+    mount::mount(
+        None::<&str>,
+        "/proc",
+        Some("proc"),
+        MsFlags::empty(),
+        None::<&str>,
+    )?;
+    mount::mount(
+        None::<&str>,
+        "/tmp",
+        Some("tmpfs"),
+        MsFlags::empty(),
+        None::<&str>,
+    )?;
 
-            // sched::unshare(sched::CloneFlags::CLONE_NEWUTS)?;
-            unistd::sethostname("container")?;
-            debug!(
-                "container nodename = {:?}",
-                sys::utsname::uname().nodename()
-            );
+    let mut command = Command::new(opts.app);
+    command.args(opts.arguments);
 
-            // sched::unshare(sched::CloneFlags::CLONE_NEWNS)?;
+    let status = command.spawn()?.wait()?;
+    debug!("application exited with status {:?}", status);
 
-            // mount::umount("/proc")?;
-            // mount::umount("/tmp")?;
+    mount::umount("/proc")?;
+    mount::umount("/tmp")?;
 
-            Ok(())
-        });
-    };
-    // let child = command.spawn().expect(&format!("{} failed to start", app));
-
-    // On success this function will not return, and otherwise it will return an error indicating why the exec (or another part of the setup of the Command) failed.
-    let err = command.exec();
-    error!("error executing {}: {}", app, err);
-    err.raw_os_error().unwrap()
+    Ok(())
 }
+
+// 其实我们要运行的程序是在 container 里的 init 线程后再运行的 （是的 app 是 init 的子进程，
+// 我们不能直接创建 app 的进程，因为 container 进程我们是希望运行在宿主环境的
+// 而如果我们直接创建 app 的进程，
+//  1. pre_exec 和 post_exec 不好办
+//  2. 信号等会不好处理，因为 init 进程不会执行未注册信号的默认逻辑，比如我们不能 ctrl c 停止一个死循环程序
+
+// 我试了一下这个 ctrl c 把 container 停了都还在跑
+// #include <stdio.h>
+// #include <unistd.h>
+
+// int main() {
+//     for (;;) {
+//         printf("Hello, World!\n");
+//         sleep(1);
+//     }
+//     return 0;
+// }
+
+// 所以其实可以在 init 线程里执行 pre_exec 和 post_exec

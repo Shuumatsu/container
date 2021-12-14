@@ -10,10 +10,11 @@ mod commands;
 mod docker;
 mod namespace;
 mod storage;
+mod utils;
 
 use anyhow::{Context, Result};
 use clap::{AppSettings, Parser};
-use commands::{run, RunOpts};
+use commands::{run, start, RunOpts};
 use nix::{sched, sys, unistd};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -30,7 +31,11 @@ struct Opts {
 
 #[derive(Parser, Debug)]
 enum SubCommand {
+    /// Run application in container
     Run(RunOpts),
+
+    #[clap(setting = AppSettings::Hidden)]
+    Start(RunOpts),
 }
 
 #[instrument]
@@ -42,10 +47,12 @@ fn main() -> Result<()> {
 
     let opts: Opts = Opts::parse();
 
-    println!("{:?}", opts);
     match opts.subcmd {
         SubCommand::Run(opts) => {
             run(opts)?;
+        }
+        SubCommand::Start(opts) => {
+            start(opts)?;
         }
     }
 

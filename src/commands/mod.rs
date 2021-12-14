@@ -1,4 +1,4 @@
 mod pull;
 mod run;
 
-pub use run::{run, RunOpts};
+pub use run::{run, start, RunOpts};
