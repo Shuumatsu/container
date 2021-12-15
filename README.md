@@ -2,7 +2,7 @@ A tiny container runtime written in Rust. The idea is to support a minimal isola
 
 |        Feature        |                   Description                   |                                                State                                                |
 | :-------------------: | :---------------------------------------------: | :-------------------------------------------------------------------------------------------------: |
-|      pivot_root       |            Change the root directory            |                                                  ✅                                                  |
+|        Chroot         |            Change the root directory            |                                                  ✅                                                  |
 |        Mounts         |    Mount files and directories to container     |                                                  ✅                                                  |
 |      Namespaces       |         Isolation of various resources          |                                                  ✅                                                  |
 |      Cgroups v2       |            Resource limitations, etc            |                                                  TODO                                                 |
